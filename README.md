@@ -1,8 +1,12 @@
 # Organization and Annotation of Eurkaryote Genomes Course 🧬🌱
- 
-This repository contains scripts for the **annotation of an assembly of Arabidopsis thaliana accession Ice-1**. The assembly was generated during the Genome and Transcriptome Assembly course ([link to git](https://github.com/ankithakmb/Genome-Transcriptome-Assembly-Course.git)) as part of the Master's in Bioinformatics and Computational Biology program.
+
+This repository contains resources, code, and materials for the Organization and Annotation of Eurkaryote Genomes course.
+
 
 ## Overview
+
+This repository contains scripts for the **annotation of an assembly of Arabidopsis thaliana accession Ice-1**. The assembly was generated during the Genome and Transcriptome Assembly course ([link to git](https://github.com/ankithakmb/Genome-Transcriptome-Assembly-Course.git)) as part of the MSc Bioinformatics and Computational Biology program.   
+
 
 The aim of this course was to perform a comprehensive genome annotation of the Ice-1 accession of Arabidopsis thaliana, a natural isolate from Iceland, with a particular focus on transposable element annotation to infer evolutionary patterns, and to conduct a pan-genome analysis comparing Ice-1 with accessions from various regions to explore genomic variation across populations.
 
