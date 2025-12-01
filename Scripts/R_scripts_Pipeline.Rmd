@@ -1,0 +1,651 @@
+---
+title: "Annotation_Arabidopsis"
+author: "Ankitha"
+date: "2025-10-15"
+output: html_document
+---
+
+#02_LRT-RTs
+```{r}
+setwd("~/Documents/04 Bern/01 UniBe/Semester3/Genome_annotation/Annotation_files/02-LTR-RTs")
+```
+
+```{r setup, include=FALSE}
+# In this script, we analyze the identity of full-length LTR retrotransposons (LTR-RTs)
+# annotated in a genome. We read a GFF file with LTR-RT annotations,
+# extract the LTR identity values, merge with classification data from TEsorter,
+# and generate plots showing the distribution of LTR identities per clade within
+# the Copia and Gypsy superfamilies.
+
+library(tidyverse)
+library(data.table)
+library(cowplot)
+
+#-------------------------------------------------
+# Input files (edit paths if needed)
+#-------------------------------------------------
+gff_file <- "HiFiasm_Ice1_primary.fa.mod.LTR.intact.raw.gff3"
+cls_file <- "HiFiasm_Ice1_primary.fa.mod.LTR.raw.fa.rexdb-plant.cls.tsv"
+# cls_file is the output from TEsorter on the raw LTR-RT fasta file
+#-------------------------------------------------
+# Read and preprocess input data
+#-------------------------------------------------
+message("Reading GFF: ", gff_file)
+anno <- read.table(gff_file, sep = "\t", header = FALSE)
+
+# Remove subfeatures (Terminal repeats, TSDs) so we keep top-level TE annotations
+exclude_feats <- c("long_terminal_repeat", "repeat_region", "target_site_duplication")
+anno <- anno %>% filter(!V3 %in% exclude_feats)
+
+# Extract Name and ltr_identity from the ninth column (attributes). This uses regex.
+
+anno <- anno %>%
+  rowwise() %>%
+  mutate(
+    # extract Name=... from attributes (V9)
+    Name = str_extract(V9, "(?<=Name=)[^;]+"),
+    # extract ltr_identity=... 
+    Identity = as.numeric(str_extract(V9, "(?<=ltr_identity=)[^;]+")),
+    # compute length as end - start
+    length = as.numeric(V5) - as.numeric(V4)
+  ) %>%
+  # keep only the columns used downstream
+  select(V1, V4, V5, V3, Name, Identity, length)
+
+message("Reading classification: ", cls_file)
+# Read classification table (TE name in first column). If your file doesn't have a header, set header=FALSE.
+cls <- fread(cls_file, sep = "\t", header = TRUE)
+setnames(cls, 1, "TE")
+
+# TEsorter outputs encode the internal domain classification as TEName_INT#Classification. We split on '#',
+# then keep only rows that correspond to internal-domain matches (Name ends with _INT), and strip _INT.
+cls <- cls %>%
+  separate(TE, into = c("Name", "Classification"), sep = "#", fill = "right") %>%
+  filter(str_detect(Name, "_INT")) %>%
+  mutate(Name = str_remove(Name, "_INT$"))
+
+## Merge annotation with classification table
+# Use a left join so all annotated TEs are kept even if they have no classification match
+anno_cls <- merge(anno, cls, by = "Name", all.x = TRUE)
+
+# Quick checks: how many per Superfamily/Clade (may be NA if classification missing)
+message("Counts per Superfamily")
+print(table(anno_cls$Superfamily, useNA = "ifany"))
+message("Counts per Clade")
+print(table(anno_cls$Clade, useNA = "ifany"))
+
+#-------------------------------------------------
+# Plot setup
+#-------------------------------------------------
+# binwidth controls histogram resolution around identity values 
+binwidth <- 0.001
+# x axis limits, these can be adjusted if needed, minimum identity in your data may differ
+xlims <- c(0.80, 1.00)
+
+# Compute a single y-max across ALL Copia and Gypsy clades. This ensures consistent y-axis scaling.
+global_ymax <- anno_cls %>%
+  filter(Superfamily %in% c("Copia", "Gypsy"), !is.na(Identity)) %>%
+  # bin Identity into consistent breaks and count occurrences
+  count(Superfamily, Clade, Identity = cut(Identity, seq(xlims[1], xlims[2], by = binwidth))) %>%
+  pull(n) %>%
+  max(na.rm = TRUE)
+
+message("Global y-limit (shared for overview plots): ", global_ymax)
+
+#-------------------------------------------------
+# Plot function for one superfamily
+#-------------------------------------------------
+plot_by_clade <- function(df, sf, ymax) {
+  df %>%
+    filter(Superfamily == sf, !is.na(Identity), !is.na(Clade)) %>%
+    ggplot(aes(x = Identity)) +
+    # histogram with color coding per superfamily
+    geom_histogram(binwidth = binwidth,
+                   color = "black",
+                   fill = ifelse(sf == "Copia", "#1b9e77", "#d95f02")) +
+    # vertical stacking: one facet per Clade (ncol = 1) and fixed y scale so bars are comparable
+    facet_wrap(~Clade, ncol = 1, scales = "fixed") +
+    # x axis focused around xlims values
+    scale_x_continuous(limits = xlims, breaks = seq(xlims[1], xlims[2], 0.05)) +
+    # set y limit to the provided ymax (useful for consistent overview plots)
+    scale_y_continuous(limits = c(0, ymax), expand = c(0, 0)) +  
+    theme_cowplot() +
+    theme(strip.background = element_rect(fill = "#f0f0f0"),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(face = "bold", hjust = 0.5)) +
+    labs(title = sf, x = "Identity", y = "Count")
+}
+
+#-------------------------------------------------
+# Generate Copia and Gypsy plots
+#-------------------------------------------------
+p_copia <- plot_by_clade(anno_cls, "Copia", global_ymax)
+p_gypsy <- plot_by_clade(anno_cls, "Gypsy", global_ymax)
+
+# Combine with cowplot side-by-side 
+combined <- plot_grid(p_copia, p_gypsy, ncol = 2, rel_widths = c(1, 1))
+
+ggsave("plots/01_LTR_Copia_Gypsy_cladelevel_bin0.001.png", combined, width = 12, height = 10, dpi = 300)
+ggsave("plots/01_LTR_Copia_Gypsy_cladelevel_bin.001.pdf", combined, width = 12, height = 10)
+```
+
+#03_TE-annotation
+```{r}
+setwd("~/Documents/04 Bern/01 UniBe/Semester3/Genome_annotation/Annotation_files/03-TE-annotations")
+```
+
+```{r}
+# Load the circlize package
+library(circlize)
+library(tidyverse)
+library(ComplexHeatmap)
+
+# Load the TE annotation GFF3 file
+gff_file <- "HiFiasm_Ice1_primary.fa.mod.EDTA.TEanno.gff3"
+gff_data <- read.table(gff_file, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+gene_gff <- read.table("filtered.genes.renamed.gff3", 
+                       sep = "\t", header = FALSE, comment.char = "#",
+                       stringsAsFactors = FALSE)
+
+# Keep only "gene" features
+genes <- gene_gff %>%
+    filter(V3 == "gene") %>%
+    mutate(chrom = V1,
+           start = V4,
+           end = V5) %>%
+    select(chrom, start, end) %>%
+    filter(chrom %in% custom_ideogram$chr)
+
+# Check the superfamilies present in the GFF3 file, and their counts
+gff_data$V3 %>% table()
+
+
+# custom ideogram data
+## To make the ideogram data, you need to know the lengths of the scaffolds.
+## There is an index file that has the lengths of the scaffolds, the `.fai` file.
+## To generate this file you need to run the following command in bash:
+## samtools faidx assembly.fasta
+## This will generate a file named assembly.fasta.fai
+## You can then read this file in R and prepare the custom ideogram data
+
+custom_ideogram <- read.table("HiFiasm_Ice1_primary.fa.fai", header = FALSE, stringsAsFactors = FALSE)
+custom_ideogram$chr <- custom_ideogram$V1
+custom_ideogram$start <- 1
+custom_ideogram$end <- custom_ideogram$V2
+custom_ideogram <- custom_ideogram[, c("chr", "start", "end")]
+custom_ideogram <- custom_ideogram[order(custom_ideogram$end, decreasing = T), ]
+sum(custom_ideogram$end[1:20]) #131587001
+
+# Select only the first 20 longest scaffolds, You can reduce this number if you have longer chromosome scale scaffolds
+custom_ideogram <- custom_ideogram[1:12, ]
+
+# Function to filter GFF3 data based on Superfamily (You need one track per Superfamily)
+filter_superfamily <- function(gff_data, superfamily, custom_ideogram) {
+    filtered_data <- gff_data[gff_data$V3 == superfamily, ] %>%
+        as.data.frame() %>%
+        mutate(chrom = V1, start = V4, end = V5, strand = V6) %>%
+        select(chrom, start, end, strand) %>%
+        filter(chrom %in% custom_ideogram$chr)
+    return(filtered_data)
+}
+
+pdf("02-TE_density_w_genes.pdf", width = 10, height = 10)
+gaps <- c(rep(1, length(custom_ideogram$chr) - 1), 5) # Add a gap between scaffolds, more gap for the last scaffold
+circos.par(start.degree = 90, gap.after = 1, track.margin = c(0, 0), gap.degree = gaps)
+# Initialize the circos plot with the custom ideogram
+circos.genomicInitialize(custom_ideogram)
+
+#add a gene density tract
+circos.genomicDensity(genes,
+                      count_by = "number",
+                      col = "#ABABAB",
+                      track.height = 0.07,
+                      window.size = 1e5)
+# Plot te density
+circos.genomicDensity(filter_superfamily(gff_data, "Gypsy_LTR_retrotransposon", custom_ideogram), count_by = "number", col = "#d95f02", track.height = 0.1, window.size = 1e5)
+circos.genomicDensity(filter_superfamily(gff_data, "Copia_LTR_retrotransposon", custom_ideogram), count_by = "number", col = "#1b9e77", track.height = 0.1, window.size = 1e5)
+circos.genomicDensity(filter_superfamily(gff_data, "Mutator_TIR_transposon", custom_ideogram), count_by = "number", col = "#FBACBE", track.height = 0.1, window.size = 1e5)
+circos.genomicDensity(filter_superfamily(gff_data, "CACTA_TIR_transposon", custom_ideogram), count_by = "number", col = "#001B2E", track.height = 0.1, window.size = 1e5)
+circos.genomicDensity(filter_superfamily(gff_data, "PIF_Harbinger_TIR_transposon", custom_ideogram), count_by = "number", col = "#4D9DE0", track.height = 0.1, window.size = 1e5)
+circos.genomicDensity(filter_superfamily(gff_data, "L1_LINE_retrotransposon", custom_ideogram), count_by = "number", col = "#F9CB40", track.height = 0.1, window.size = 1e5)
+circos.clear()
+
+lgd <- Legend(
+    title = "Superfamily", at = c("Genes", "Gypsy LTR retrotransposon", "Copia LTR retrotransposon", "Mutator TIR transposon", "CACTA TIR transposon", "PIF/Harbinger TIR transposon", "L1 LINE retrotransposon"),
+    legend_gp = gpar(fill = c("#ABABAB","#d95f02", "#1b9e77", "#FBACBE", "#001B2E", "#4D9DE0", "#F9CB40")),
+    title_gp  = gpar(fontfamily = "Helvetica", fontface = "bold", fontsize = 12),
+    labels_gp = gpar(fontfamily = "Helvetica", fontsize = 10))
+
+
+draw(lgd, x = unit(12.8, "cm"), y = unit(12.8, "cm"), just = c("center"))
+
+dev.off()
+# Now plot all your most abundant TE superfamilies in one plot.Done
+
+# Plot the distribution of Athila and CRM clades (known centromeric TEs in Brassicaceae).
+#subset into athila and crm 
+#comparewith gff3 file, get name and merge with tsv
+#check the columsn _int crop that to that the names match 
+# You need to run the TEsorter on TElib to get the clades classification from the TE library
+
+```
+
+#04_Dynamics of Transposable Elements 
+```{r}
+setwd("~/Documents/04 Bern/01 UniBe/Semester3/Genome_annotation/Annotation_files/04_Dynamics_TE")
+```
+
+```{r}
+library(reshape2)
+# library(hrbrthemes)
+library(tidyverse)
+library(data.table)
+
+
+# get data from parameter
+
+data <- "HiFiasm_Ice1_primary.fa.mod.out.landscape.Div.Rname.tab"
+
+rep_table <- fread(data, header = FALSE, sep = "\t")
+rep_table %>% head()
+# How does the data look like?
+
+colnames(rep_table) <- c("Rname", "Rclass", "Rfam", 1:50)
+rep_table <- rep_table %>% filter(Rfam != "unknown")
+rep_table$fam <- paste(rep_table$Rclass, rep_table$Rfam, sep = "/")
+
+rep_table$fam <- gsub("MITE.*", "MITE", rep_table$fam)
+rep_table$fam[rep_table$fam =="RC/Helitron"] <- NA
+rep_table$fam[rep_table$fam =="DNA/Helitron"] <- NA
+table(rep_table$fam)
+# How many elements are there in each Superfamily?
+rep_table.m <- melt(rep_table)
+
+rep_table.m <- rep_table.m[-c(which(rep_table.m$variable == 1)), ] # remove the peak at 1, as the library sequences are copies in the genome, they inflate this low divergence peak
+
+# Arrange the data so that they are in the following order:
+# LTR/Copia, LTR/Gypsy, all types of DNA transposons (TIR transposons), DNA/Helitron, all types of MITES
+rep_table.m$fam <- rep_table.m$fam 
+rep_table.m$fam <- factor(rep_table.m$fam, levels = c("LTR/Copia", "LTR/Gypsy", "DNA/DTA", "DNA/DTC", "DNA/DTH", "DNA/DTM", "DNA/DTT", "DNA/MULE-MuDR", "DNA/PIF-Harbinger","DNA/CMC-EnSpm", "LINE/L1", "MITE"))
+
+# NOTE: Check that all the superfamilies in your dataset are included above
+
+rep_table.m$distance <- as.numeric(rep_table.m$variable) / 100 # as it is percent divergence
+
+# Question:
+rep_table.m$age <-rep_table.m$distance/(2*(8.22*(10^-9)))
+# Calculate using the substitution rate and the formula provided in the tutorial. T = K/2r formula, where K is the sequence divergence, and r is the substitution rate
+
+
+# options(scipen = 999)
+
+# remove helitrons as EDTA is not able to annotate them properly (https://github.com/oushujun/EDTA/wiki/Making-sense-of-EDTA-usage-and-outputs---Q&A)
+rep_table.m <- rep_table.m %>% filter(fam != "NA")
+
+ggplot(rep_table.m, aes(fill = fam, x = distance, weight = value / 1000000)) +
+  geom_bar() +
+  cowplot::theme_cowplot() +
+  scale_fill_brewer(palette = "Paired") +
+  geom_vline(xintercept = 0.09, colour = "red3", linetype = "dashed") +
+  xlab("Distance") +
+  ylab("Sequence (Mbp)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 9, hjust = 1),
+  plot.title = element_text(hjust = 0.5))
+
+ggsave(filename = "Plots/output.pdf", width = 10, height = 5, useDingbats = F)
+
+
+
+# Why is it important to have this plot in Mbp instead of counts? 
+# Hint: 
+# Consider a scenario where there is a lot of small fragments of TEs due to nested insertions and deletions.
+# How would that affect the plot if you used counts instead of Mbp?
+#
+
+```
+
+```{r}
+library(Hmisc)
+mites <- rep_table.m[rep_table.m$fam == "MITE", ]
+max(mites$age)
+mean(mites$age)
+min(mites$age)
+
+```
+#05_AED plots
+```{r}
+setwd("~/Documents/04 Bern/01 UniBe/Semester3/Genome_annotation/Annotation_files/06_Geneious")
+```
+
+```{r}
+library(tidyverse)
+library(cowplot)
+
+# Read AED values file (generated by AED_cdf_generator.pl)
+aed_file <- "assembly.all.maker.renamed.gff.AED.txt"
+
+aed_cdf <- read_delim(aed_file, 
+                      delim = "\t", 
+                      col_names = TRUE,
+                      show_col_types = FALSE)
+
+colnames(aed_cdf) <- c("AED", "Cumulative_Fraction")
+
+cat("\n", rep("=", 80), "\n")
+cat("AED SCORE STATISTICS\n")
+cat(rep("=", 80), "\n\n")
+
+# Calculate the proportion in each AED bin
+aed_data <- aed_cdf %>%
+  arrange(AED) %>%
+  mutate(
+    Density = c(Cumulative_Fraction[1], diff(Cumulative_Fraction)),
+    Percentage = Density * 100
+  )
+
+# Calculate summary statistics
+fraction_below_0.25 <- aed_cdf$Cumulative_Fraction[aed_cdf$AED == 0.250]
+fraction_below_0.5 <- aed_cdf$Cumulative_Fraction[aed_cdf$AED == 0.500]
+fraction_above_0.5 <- 1 - fraction_below_0.5
+
+cat("AED Quality Distribution:\n")
+cat("Genes with AED ≤ 0.25 (excellent):", sprintf("%.2f%%\n", fraction_below_0.25 * 100))
+cat("Genes with AED ≤ 0.5 (good):", sprintf("%.2f%%\n", fraction_below_0.5 * 100))
+cat("Genes with AED > 0.5 (poor):", sprintf("%.2f%%\n", fraction_above_0.5 * 100))
+
+# ============================================================================
+# AED Distribution Histogram
+# ============================================================================
+
+p_aed_hist <- ggplot(aed_data, aes(x = AED, y = Percentage)) +
+  geom_bar(stat = "identity", fill = "lightblue", color = "black", width = 0.023) +
+  geom_vline(xintercept = 0.25, linetype = "dashed", color = "darkgreen", linewidth = 1) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "orange", linewidth = 1) +
+  annotate("rect", xmin = 0, xmax = 0.25, ymin = 0, ymax = Inf, 
+           alpha = 0.1, fill = "darkgreen") +
+  annotate("rect", xmin = 0.25, xmax = 0.5, ymin = 0, ymax = Inf, 
+           alpha = 0.1, fill = "orange") +
+  annotate("rect", xmin = 0.5, xmax = 1, ymin = 0, ymax = Inf, 
+           alpha = 0.1, fill = "red") +
+  annotate("text", x = 0.125, y = max(aed_data$Percentage, na.rm = TRUE) * 0.9, 
+           label = "Excellent\n(≤0.25)", size = 3.5, fontface = "bold", color = "darkgreen") +
+  annotate("text", x = 0.375, y = max(aed_data$Percentage, na.rm = TRUE) * 0.9, 
+           label = "Good\n(0.25-0.5)", size = 3.5, fontface = "bold", color = "darkorange") +
+  annotate("text", x = 0.75, y = max(aed_data$Percentage, na.rm = TRUE) * 0.9, 
+           label = "Poor\n(>0.5)", size = 3.5, fontface = "bold", color = "darkred") +
+  theme_cowplot() +
+  labs(
+    title = "Distribution of Annotation Edit Distance (AED) Scores",
+    subtitle = sprintf("Good quality (AED ≤ 0.5): %.1f%% | Excellent (AED ≤ 0.25): %.1f%%",
+                       fraction_below_0.5 * 100, fraction_below_0.25 * 100),
+    x = "AED Score",
+    y = "Percentage of Genes (%)"
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, 0.1))
+
+ggsave(file.path(plot_dir, "07-AED_distribution_histogram.png"), 
+       p_aed_hist, width = 12, height = 8, dpi = 300)
+ggsave(file.path(plot_dir, "07-AED_distribution_histogram.pdf"), 
+       p_aed_hist, width = 12, height = 8)
+
+cat("\nAED histogram saved to:", file.path(plot_dir, "07-AED_distribution_histogram.pdf"), "\n")
+```
+
+#06_genespace
+```{r}
+setwd("~/Documents/04 Bern/01 UniBe/Semester3/Genome_annotation/Annotation_files/08_genespace")
+```
+
+```{r}
+library(tidyverse)
+library(readr)
+
+# -----------------
+# 0) Inputs
+# -----------------
+wd <- "~/Documents/04 Bern/01 UniBe/Semester3/Genome_annotation/Annotation_files/08_genespace" # set your working directory where the pangenome_matrix.rds is located
+focal_genome <- "Ice_1" # Your focal accession name
+pangenome <- readRDS(file.path(wd, "pangenome_matrix.rds"))
+
+# genome columns are list-columns produced by query_pangenes()
+genome_cols <- names(pangenome)[sapply(pangenome, is.list)]
+
+# Check that the genomes are as expected
+genome_cols
+
+pg <- as_tibble(pangenome)
+
+
+# Remove out-of-synteny genes (IDs ending with '*') from all genome list-columns
+clean_gene_list <- function(v) {
+  if (is.null(v) || length(v) == 0) {
+    return(character(0))
+  }
+  v <- as.character(v)
+  v <- v[!is.na(v)]
+  v <- trimws(v)
+  v <- v[!grepl("\\*$", v)] # drop genes ending with '*'
+  unique(v)
+}
+
+pg <- pg %>%
+  mutate(across(all_of(genome_cols), ~ lapply(.x, clean_gene_list)))
+
+# Remove orthogroups that are now empty in ALL genomes after cleaning
+# (i.e., all genome columns have length 0)
+pg <- pg %>%
+  rowwise() %>%
+  filter(
+    sum(sapply(c_across(all_of(genome_cols)), length)) > 0
+  ) %>%
+  ungroup()
+
+
+# Check the pangenome table
+head(data.frame(pg))
+
+
+# How many orthogroups are there?
+nrow(pg) #33187
+
+# -----------------
+# 1) Presence/absence per genome (orthogroup-level)
+#    TRUE if the cell has a non-empty list of gene IDs
+# -----------------
+presence_tbl <- pg %>%
+  transmute(
+    pgID,
+    across(
+      all_of(genome_cols),
+      ~ lengths(.x) > 0,
+      .names = "{.col}"
+    )
+  )
+
+# Check the presence table
+head(presence_tbl)
+
+
+# -----------------
+# 2) Global orthogroup flags
+# -----------------
+n_genomes <- length(genome_cols)
+
+pg_flags <- presence_tbl %>%
+  mutate(
+    # Count how many genomes have each orthogroup
+    n_present = select(., all_of(genome_cols)) %>% rowSums(),
+
+    # Core = present in ALL genomes
+    is_core_all = (n_present == n_genomes),
+
+    # Accessory = present in SOME genomes (not all)
+    is_accessory = (n_present < n_genomes),
+
+    # Is this orthogroup in our focal genome?
+    present_in_focal = .data[[focal_genome]],
+
+    # Focal-specific = ONLY in focal genome
+    focal_specific = (present_in_focal & n_present == 1),
+
+    # Lost in focal = present in other genomes but NOT focal
+    lost_in_focal = (!present_in_focal & n_present > 0),
+
+    # Almost-core lost in focal = in all genomes EXCEPT focal
+    lost_core_without_focal = (!present_in_focal & n_present == (n_genomes - 1)),
+
+    # Identify genes lost compared to TAIR10
+    lost_vs_TAIR10 = (!present_in_focal) & .data[["TAIR10"]]
+  ) %>%
+  # Add simple category labels
+  mutate(
+    category = case_when(
+      is_core_all ~ "core",
+      n_present == 1 ~ "species_specific",
+      TRUE ~ "accessory"
+    )
+  )
+
+# Check the flags table
+head(data.frame(pg_flags))
+table(pg_flags$category) #accessory: 5777 | core: 21598 | species_specific: 5812
+
+# -----------------
+# 3) GENE counts per orthogroup × genome
+#    convert list entries to integer counts = number of unique gene IDs
+# -----------------
+count_genes <- function(gene_list) {
+  if (is.null(gene_list) || length(gene_list) == 0) {
+    return(0)
+  }
+  # Count unique genes
+  length(unique(gene_list))
+}
+
+# Apply the function to all genome columns
+gene_counts_matrix <- pg %>%
+  select(pgID, all_of(genome_cols)) %>%
+  mutate(across(
+    all_of(genome_cols),
+    ~ sapply(.x, count_genes)
+  ))
+
+# Check the gene counts matrix
+head(gene_counts_matrix)
+
+# -----------------
+# 4) GENE counts per genome & category
+# -----------------
+# add category to the matrix
+gene_counts_w_cat <- pg_flags %>%
+  select(pgID, category) %>%
+  left_join(gene_counts_matrix, by = "pgID")
+
+# Calculate total genes per genome (sum gene counts by category)
+gene_by_cat <- gene_counts_w_cat %>%
+  pivot_longer(cols = all_of(genome_cols), names_to = "genome", values_to = "gene_count") %>%
+  group_by(genome, category) %>%
+  summarise(gene_count = sum(gene_count), .groups = "drop")
+
+# Total genes per genome (sum across all categories)
+gene_totals <- gene_by_cat %>%
+  group_by(genome) %>%
+  summarise(gene_total = sum(gene_count), .groups = "drop")
+
+# spread categories for a per-genome wide table
+gene_counts_per_genome <- gene_by_cat %>%
+  pivot_wider(names_from = category, values_from = gene_count, values_fill = 0) %>%
+  rename(
+    gene_core = core,
+    gene_accessory = accessory,
+    gene_specific = species_specific
+  ) %>%
+  left_join(gene_totals, by = "genome") %>%
+  mutate(
+    # Calculate percentages of genes by category
+    percent_core = round(100 * gene_core / pmax(gene_total, 1), 2),
+    percent_specific = round(100 * gene_specific / pmax(gene_total, 1), 2)
+  )
+
+# Check the gene counts per genome
+head(data.frame(gene_counts_per_genome))
+
+
+# -----------------
+# 5) Pangenome frequency plot: OGs and genes in n genomes
+# -----------------
+
+#  Count orthogroups by number of genomes they're present in
+og_freq <- pg_flags %>%
+  count(n_present, name = "count") %>%
+  mutate(type = "Orthogroups")
+
+# Count gene, how many present in orthogroups present in n genomes
+# Create a long table of (pgID, genome, gene) and attach the orthogroup-level n_present
+all_genes_with_presence <- pg %>%
+  select(pgID, all_of(genome_cols)) %>%
+  pivot_longer(cols = all_of(genome_cols), names_to = "genome", values_to = "genes_list") %>%
+  # drop empty/null lists
+  filter(!sapply(genes_list, is.null) & sapply(genes_list, length) > 0) %>%
+  unnest_longer(genes_list) %>%
+  rename(gene = genes_list) %>%
+  filter(!is.na(gene)) %>%
+  mutate(gene = as.character(gene)) %>%
+  distinct(pgID, genome, gene) %>% # one row per distinct gene occurrence in a pgID/genome
+  left_join(select(pg_flags, pgID, n_present), by = "pgID")
+
+
+
+# Count genes by the n_present of their orthogroup.
+# This counts unique gene × orthogroup occurrences.
+gene_freq <- all_genes_with_presence %>%
+  distinct(pgID, gene, n_present) %>% # unique gene in each orthogroup
+  count(n_present, name = "count") %>%
+  mutate(type = "Genes")
+
+# Combine both
+freq_data <- bind_rows(og_freq, gene_freq)
+
+# Plot with better formatting
+ggplot(freq_data, aes(x = n_present, y = count, fill = type)) +
+  geom_col(position = "dodge", alpha = 0.8, width = 0.7) +
+  scale_x_continuous(
+    breaks = 1:n_genomes,
+    labels = 1:n_genomes
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values = c("Genes" = "#0072B2", "Orthogroups" = "#D55E00")) +
+  labs(
+    x = "Number of genomes",
+    y = "Count",
+    fill = NULL,
+    title = "Pangenome composition: distribution across genomes",
+    subtitle = paste("Total genomes:", n_genomes)
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+ggsave(file.path(wd, "pangenome_frequency_plot.pdf"), width = 10, height = 6)
+
+# Summary table
+freq_summary <- freq_data %>%
+  pivot_wider(names_from = type, values_from = count, values_fill = 0) %>%
+  mutate(
+    label = case_when(
+      n_present == n_genomes ~ "Core (all genomes)",
+      n_present == 1 ~ "Species-specific (1 genome)",
+      TRUE ~ paste0("Shared (", n_present, " genomes)")
+    )
+  ) %>%
+  arrange(desc(n_present)) %>%
+  select(n_present, label, Orthogroups, Genes)
+
+print(freq_summary)
+
+
+
+```
